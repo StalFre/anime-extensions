@@ -10,6 +10,7 @@ import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
 import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
 import keiyoushi.utils.ParsedAnimeHttpLegacySource
@@ -147,6 +148,11 @@ abstract class AnimeJara :
 
     override fun videoFromElement(element: Element) = throw UnsupportedOperationException()
 
+    // Episode pages answer HTTP 404 but still carry the player, so skip the success check.
+    override suspend fun getVideoList(episode: SEpisode): List<Video> = client.newCall(videoListRequest(episode))
+        .await()
+        .use(::videoListParse)
+
     override fun videoListParse(response: Response): List<Video> {
         val html = response.body.string()
         val document = Jsoup.parse(html, response.request.url.toString())
@@ -168,12 +174,14 @@ abstract class AnimeJara :
 
         return Regex("""playVideo\((?:&quot;|")(.*?)(?:&quot;|")\)""").findAll(body)
             .map { it.groupValues[1] }
+            // hgcloud/hglink only redirect via JS; their mirrors serve the player directly
+            .map { it.replace("hgcloud.to", "hanerix.com").replace("hglink.to", "hanerix.com") }
             .distinct()
             .flatMap { url ->
                 runCatching {
                     when {
                         "streamtape" in url -> streamTapeExtractor.videosFromUrl(url, "${prefix}Streamtape")
-                        listOf("filelions", "hgcloud", "hglink", "vidhide").any { it in url } ->
+                        listOf("filelions", "hanerix", "vidhide").any { it in url } ->
                             runBlocking { VidHideExtractor(client, playerHeaders).videosFromUrl(url) { q -> "${prefix}VidHide: $q" } }
                         // shortcut: the "nyuu" player is obfuscated and skipped, add it if it is needed
                         else -> emptyList()

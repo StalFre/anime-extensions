@@ -6,7 +6,7 @@ plugins {
 
 yuzono {
     name = "AnimeJara"
-    versionCode = 1
+    versionCode = 2
     contentWarning = ContentWarning.SAFE
     libVersion = "14"
 
