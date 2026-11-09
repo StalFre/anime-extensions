@@ -6,6 +6,7 @@ import aniyomi.lib.streamtapeextractor.StreamTapeExtractor
 import aniyomi.lib.vidhideextractor.VidHideExtractor
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
+import eu.kanade.tachiyomi.animesource.model.Hoster
 import eu.kanade.tachiyomi.animesource.model.SAnime
 import eu.kanade.tachiyomi.animesource.model.SEpisode
 import eu.kanade.tachiyomi.animesource.model.Video
@@ -15,7 +16,6 @@ import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
 import keiyoushi.utils.ParsedAnimeHttpLegacySource
 import keiyoushi.utils.getPreferencesLazy
-import kotlinx.coroutines.runBlocking
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
@@ -148,65 +148,94 @@ abstract class AnimeJara :
 
     override fun videoFromElement(element: Element) = throw UnsupportedOperationException()
 
-    // Episode pages answer HTTP 404 but still carry the player, so skip the success check.
-    override suspend fun getVideoList(episode: SEpisode): List<Video> = client.newCall(videoListRequest(episode))
-        .await()
-        .use(::videoListParse)
-
-    override fun videoListParse(response: Response): List<Video> {
-        val html = response.body.string()
-        val document = Jsoup.parse(html, response.request.url.toString())
-        val langs = document.select(".boton-idioma .lang-name").map { it.text().trim() }
+    // One Hoster per server, named "SUB <server>" / "DUB <server>" like AnimeAV1, so players can list servers and switch SUB/DUB.
+    override suspend fun getHosterList(episode: SEpisode): List<Hoster> {
+        // Episode pages answer HTTP 404 but still carry the player, so skip the success check.
+        val html = client.newCall(videoListRequest(episode)).await().use { it.body.string() }
+        val document = Jsoup.parse(html, baseUrl + episode.url)
+        val langs = document.select(".boton-idioma .lang-name").map { it.text().trim().uppercase(Locale.ROOT) }
+        val dubLang = preferences.getString(PREF_DUB_KEY, PREF_DUB_DEFAULT)!!
 
         val embeds = Regex("""const enlaces\s*=\s*(\[.*?\])""", RegexOption.DOT_MATCHES_ALL).find(html)
             ?.let { m -> JSONArray(m.groupValues[1]).let { a -> (0 until a.length()).map { a.getString(it) } } }
             ?: listOfNotNull(document.selectFirst("iframe[id^=iframe-video]")?.attr("abs:src"))
 
-        return embeds.flatMapIndexed { i, embed -> videosFromEmbed(embed, langs.getOrNull(i).orEmpty()) }
+        return embeds.flatMapIndexed { i, embed ->
+            val lang = langs.getOrNull(i).orEmpty()
+            val type = when {
+                lang.startsWith("JAP") -> "SUB"
+                lang == dubLang -> "DUB"
+                else -> return@flatMapIndexed emptyList() // the other dub language, chosen in settings
+            }
+            serversFromEmbed(embed).map { (server, url) ->
+                Hoster(hosterUrl = url, hosterName = "$type $server", internalData = "$lang|$embed")
+            }
+        }.sortHosters()
     }
 
-    private fun videosFromEmbed(embedUrl: String, lang: String): List<Video> {
+    private fun serversFromEmbed(embedUrl: String): List<Pair<String, String>> {
         val embedHeaders = headers.newBuilder().set("Referer", "$baseUrl/").build()
         val body = runCatching { client.newCall(GET(embedUrl, embedHeaders)).execute().use { it.body.string() } }
             .getOrNull() ?: return emptyList()
-        val prefix = if (lang.isBlank()) "" else "$lang - "
-        val playerHeaders = headers.newBuilder().set("Referer", embedUrl).build()
-
         return Regex("""playVideo\((?:&quot;|")(.*?)(?:&quot;|")\)""").findAll(body)
             .map { it.groupValues[1] }
             // hgcloud/hglink only redirect via JS; their mirrors serve the player directly
             .map { it.replace("hgcloud.to", "hanerix.com").replace("hglink.to", "hanerix.com") }
             .distinct()
-            .flatMap { url ->
-                runCatching {
-                    when {
-                        "streamtape" in url -> streamTapeExtractor.videosFromUrl(url, "${prefix}Streamtape")
-                        listOf("filelions", "hanerix", "vidhide").any { it in url } ->
-                            runBlocking { VidHideExtractor(client, playerHeaders).videosFromUrl(url) { q -> "${prefix}VidHide: $q" } }
-                        // shortcut: the "nyuu" player is obfuscated and skipped, add it if it is needed
-                        else -> emptyList()
-                    }
-                }.getOrDefault(emptyList())
+            .mapNotNull { url ->
+                when {
+                    "streamtape" in url -> "Streamtape" to url
+                    "hanerix" in url -> "StreamHG" to url
+                    "filelions" in url || "vidhide" in url -> "VidHide" to url
+                    // shortcut: the "nyuu" player is obfuscated and skipped, add it if it is needed
+                    else -> null
+                }
             }.toList()
     }
 
+    override suspend fun getVideoList(hoster: Hoster): List<Video> {
+        val (lang, embedUrl) = hoster.internalData.split("|", limit = 2)
+        val server = hoster.hosterName.substringAfter(' ')
+        val url = hoster.hosterUrl
+        val playerHeaders = headers.newBuilder().set("Referer", embedUrl).build()
+        return runCatching {
+            when (server) {
+                "Streamtape" -> streamTapeExtractor.videosFromUrl(url, "$lang - Streamtape")
+                else -> VidHideExtractor(client, playerHeaders).videosFromUrl(url) { q -> "$lang - $server: $q" }
+            }
+        }.getOrDefault(emptyList()).sortVideos()
+    }
+
+    override fun List<Hoster>.sortHosters(): List<Hoster> {
+        val type = preferences.getString(PREF_TYPE_KEY, PREF_TYPE_DEFAULT)!!
+        return sortedByDescending { it.hosterName.startsWith(type) }
+    }
+
     override fun List<Video>.sortVideos(): List<Video> {
-        val lang = preferences.getString(PREF_LANG_KEY, PREF_LANG_DEFAULT)!!
         val quality = preferences.getString(PREF_QUALITY_KEY, PREF_QUALITY_DEFAULT)!!
         return sortedWith(
-            compareByDescending<Video> { it.videoTitle.contains(lang, true) }
-                .thenByDescending { it.videoTitle.contains(quality) },
+            compareByDescending<Video> { it.videoTitle.contains(quality) }
+                .thenByDescending { Regex("""(\d{3,4})p""").find(it.videoTitle)?.groupValues?.get(1)?.toIntOrNull() ?: 0 },
         )
     }
 
     // ============================== Settings ==============================
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         ListPreference(screen.context).apply {
-            key = PREF_LANG_KEY
-            title = "Idioma preferido"
-            entries = LANG_LIST
-            entryValues = LANG_LIST
-            setDefaultValue(PREF_LANG_DEFAULT)
+            key = PREF_TYPE_KEY
+            title = "Preferir SUB o DUB"
+            entries = TYPE_LIST
+            entryValues = TYPE_LIST
+            setDefaultValue(PREF_TYPE_DEFAULT)
+            summary = "%s"
+        }.also(screen::addPreference)
+
+        ListPreference(screen.context).apply {
+            key = PREF_DUB_KEY
+            title = "Idioma del doblaje (DUB)"
+            entries = DUB_LIST
+            entryValues = DUB_LIST
+            setDefaultValue(PREF_DUB_DEFAULT)
             summary = "%s"
         }.also(screen::addPreference)
 
@@ -221,9 +250,13 @@ abstract class AnimeJara :
     }
 
     companion object {
-        private const val PREF_LANG_KEY = "preferred_lang"
-        private const val PREF_LANG_DEFAULT = "LATINO"
-        private val LANG_LIST = arrayOf("LATINO", "CASTELLANO", "JAPONES")
+        private const val PREF_TYPE_KEY = "preferred_type"
+        private const val PREF_TYPE_DEFAULT = "SUB"
+        private val TYPE_LIST = arrayOf("SUB", "DUB")
+
+        private const val PREF_DUB_KEY = "dub_lang"
+        private const val PREF_DUB_DEFAULT = "LATINO"
+        private val DUB_LIST = arrayOf("LATINO", "CASTELLANO")
 
         private const val PREF_QUALITY_KEY = "preferred_quality"
         private const val PREF_QUALITY_DEFAULT = "1080"
