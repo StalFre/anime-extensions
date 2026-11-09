@@ -16,6 +16,9 @@ import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.annotation.Source
 import keiyoushi.utils.ParsedAnimeHttpLegacySource
 import keiyoushi.utils.getPreferencesLazy
+import okhttp3.Cookie
+import okhttp3.CookieJar
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
@@ -195,7 +198,7 @@ abstract class AnimeJara :
                     "streamtape" in url -> "Streamtape" to url
                     "hanerix" in url -> "StreamHG" to url
                     "filelions" in url || "vidhide" in url -> "VidHide" to url
-                    // shortcut: the "nyuu" player is obfuscated and skipped, add it if it is needed
+                    "nyuu.streamhj" in url -> "Nyuu" to url
                     else -> null
                 }
             }.toList()
@@ -209,9 +212,40 @@ abstract class AnimeJara :
         return runCatching {
             when (server) {
                 "Streamtape" -> streamTapeExtractor.videosFromUrl(url, "$lang - Streamtape")
+                "Nyuu" -> listOfNotNull(nyuuVideo(url, lang))
                 else -> VidHideExtractor(client, playerHeaders).videosFromUrl(url) { q -> "$lang - $server: $q" }
             }
         }.getOrDefault(emptyList()).sortVideos()
+    }
+
+    // Nyuu: go.php -> ody_go.php opens a PHP session holding the video, then the DPlayer "url" redirects to a signed mp4.
+    private fun nyuuVideo(goUrl: String, lang: String): Video? {
+        // Own cookie jar per call: the session holds one video, so parallel hosters must not share it.
+        val jar = object : CookieJar {
+            private val cookies = mutableListOf<Cookie>()
+            override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+                this.cookies.removeAll { old -> cookies.any { it.name == old.name } }
+                this.cookies.addAll(cookies)
+            }
+            override fun loadForRequest(url: HttpUrl) = cookies.filter { it.matches(url) }
+        }
+        val nyuuClient = client.newBuilder().cookieJar(jar).followRedirects(false).followSslRedirects(false).build()
+
+        val playerUrl = goUrl.replace("/go.php", "/ody_go.php")
+        val page = nyuuClient.newCall(GET(playerUrl, headers.newBuilder().set("Referer", goUrl).build()))
+            .execute().use { it.body.string() }
+        val videoPath = Regex("""video:\s*\{\s*url:\s*'([^']+)'""").find(page)?.groupValues?.get(1) ?: return null
+
+        val referer = headers.newBuilder().set("Referer", playerUrl).build()
+        var next = playerUrl.toHttpUrl().resolve(videoPath) ?: return null
+        repeat(10) {
+            if (!next.host.endsWith("streamhj.top")) {
+                return Video(next.toString(), "$lang - Nyuu", next.toString())
+            }
+            val location = nyuuClient.newCall(GET(next, referer)).execute().use { it.header("Location") } ?: return null
+            next = next.resolve(location) ?: return null
+        }
+        return null
     }
 
     override fun List<Hoster>.sortHosters(): List<Hoster> {
