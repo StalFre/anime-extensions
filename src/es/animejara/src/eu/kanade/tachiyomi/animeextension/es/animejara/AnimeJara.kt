@@ -124,7 +124,6 @@ abstract class AnimeJara :
         val json = Regex("""TEMPORADAS_DATA\s*=\s*(\[.*?\]);\s*\n""", RegexOption.DOT_MATCHES_ALL)
             .find(script)?.groupValues?.get(1) ?: return emptyList()
         val seasons = JSONArray(json)
-        val multiSeason = seasons.length() > 1
         val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT)
 
         val episodes = buildList {
@@ -139,11 +138,8 @@ abstract class AnimeJara :
                     add(
                         SEpisode.create().apply {
                             url = "/episode/$slug-${seasonNum}x$num/"
-                            name = buildString {
-                                if (multiSeason) append("T$seasonNum ")
-                                append("Episodio $num")
-                                if (title.isNotBlank()) append(" - $title")
-                            }
+                            // Same "Season N x E - title" format as DooPlay/AnimeOnlineNinja so apps can split seasons.
+                            name = "Season $seasonNum x $num - ${title.ifBlank { "Episodio $num" }}"
                             episode_number = num.toFloatOrNull() ?: 0F
                             date_upload = runCatching { dateFormat.parse(ep.optString("fecha_actualizacion"))!!.time }.getOrDefault(0L)
                             scanlator = ep.optJSONArray("idiomas")?.let { a -> (0 until a.length()).joinToString { a.getString(it) } }
