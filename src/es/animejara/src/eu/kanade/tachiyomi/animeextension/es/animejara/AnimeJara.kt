@@ -36,6 +36,18 @@ abstract class AnimeJara :
 
     private val preferences by getPreferencesLazy()
 
+    // The site answers HTTP 404 on catalog page 2+ and on episode pages while still sending the full content.
+    override val client = network.client.newBuilder()
+        .addInterceptor { chain ->
+            val response = chain.proceed(chain.request())
+            if (response.code == 404 && response.request.url.host.endsWith("animejara.com")) {
+                response.newBuilder().code(200).build()
+            } else {
+                response
+            }
+        }
+        .build()
+
     private val streamTapeExtractor by lazy { StreamTapeExtractor(client) }
 
     // ============================== Popular ===============================

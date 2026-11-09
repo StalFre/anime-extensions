@@ -56,6 +56,11 @@ jobs:
       - name: Build
         run: ./gradlew :src:es:animejara:assembleRelease
 
+      - name: Signing key fingerprint
+        run: |
+          FP="$(keytool -exportcert -alias "$ALIAS" -keystore signingkey.jks -storepass "$KEY_STORE_PASSWORD" | sha256sum | cut -d' ' -f1)"
+          echo "SIGNING_FINGERPRINT=$FP" >> "$GITHUB_ENV"
+
       - name: Publish to repo branch
         env:
           GH_TOKEN: ${{ github.token }}

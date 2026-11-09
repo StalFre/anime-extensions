@@ -44,3 +44,14 @@ index_file = out / "index.min.json"
 index = json.loads(index_file.read_text(encoding="utf-8")) if index_file.exists() else []
 index = [e for e in index if e["pkg"] != pkg] + [entry]
 index_file.write_text(json.dumps(index, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+# Anikku/Mihon-style clients refuse a repo without repo.json and its signing key fingerprint.
+repo_meta = {
+    "meta": {
+        "name": "StalFre",
+        "shortName": "StalFre",
+        "website": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}",
+        "signingKeyFingerprint": os.environ["SIGNING_FINGERPRINT"],
+    }
+}
+(out / "repo.json").write_text(json.dumps(repo_meta, indent=2), encoding="utf-8")
