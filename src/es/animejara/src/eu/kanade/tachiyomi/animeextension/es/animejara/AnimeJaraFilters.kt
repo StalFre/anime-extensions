@@ -4,8 +4,7 @@ import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 
 object AnimeJaraFilters {
-    class SelectFilter(name: String, private val param: String, private val vals: Array<Pair<String, String>>) :
-        AnimeFilter.Select<String>(name, vals.map { it.first }.toTypedArray()) {
+    class SelectFilter(name: String, private val param: String, private val vals: Array<Pair<String, String>>) : AnimeFilter.Select<String>(name, vals.map { it.first }.toTypedArray()) {
         fun toPair() = param to vals[state].second
     }
 
